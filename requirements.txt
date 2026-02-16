@@ -3,3 +3,4 @@ anthropic>=0.18.0
 google-api-python-client>=2.100.0
 google-auth>=2.25.0
 pytrends>=4.9.2
+pandas>=2.0.0
