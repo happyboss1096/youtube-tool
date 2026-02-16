@@ -1,15 +1,23 @@
 """
-🎬 YouTube 콘텐츠 제작 도우미 v2.0
-트렌드 분석 + 대본 생성 (웹 배포 버전)
+🎬 YouTube 콘텐츠 제작 도우미 v3.0
+트렌드 분석 + 대본 생성 (업그레이드 버전)
 
-Streamlit Cloud 배포용
+주요 기능:
+- 언어/지역별 필터
+- Google Trends 연동 (급상승 키워드)
+- 기간별 인기 검색어/영상
+- 경쟁 채널 분석
+- 영상 세부 분석 (좋아요율, 댓글율, 업로드 패턴 등)
+- 벤치마킹 기능
 """
 import streamlit as st
 import json
 import os
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional
 import re
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional, Tuple
+from collections import Counter
+import pandas as pd
 
 # API 클라이언트
 try:
@@ -34,7 +42,7 @@ except ImportError:
 # ============ 페이지 설정 ============
 
 st.set_page_config(
-    page_title="YouTube 콘텐츠 제작 도우미",
+    page_title="YouTube 콘텐츠 제작 도우미 v3",
     page_icon="🎬",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -52,860 +60,948 @@ st.markdown("""
         text-align: center;
         padding: 1rem 0;
     }
-    .sub-header {
-        text-align: center;
-        color: #666;
-        margin-bottom: 2rem;
-    }
     .metric-card {
-        background: #f8f9fa;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         padding: 1rem;
         border-radius: 10px;
-        border-left: 4px solid #4ECDC4;
+        color: white;
+        text-align: center;
     }
-    .warning-box {
-        background: #fff3cd;
-        padding: 1rem;
-        border-radius: 10px;
-        border-left: 4px solid #ffc107;
+    .trend-up { color: #00C851; font-weight: bold; }
+    .trend-down { color: #ff4444; font-weight: bold; }
+    .keyword-tag {
+        display: inline-block;
+        background: #e3f2fd;
+        padding: 0.3rem 0.8rem;
+        border-radius: 15px;
+        margin: 0.2rem;
+        font-size: 0.9rem;
     }
-    .success-box {
-        background: #d4edda;
-        padding: 1rem;
+    .video-card {
+        border: 1px solid #eee;
         border-radius: 10px;
-        border-left: 4px solid #28a745;
+        padding: 1rem;
+        margin: 0.5rem 0;
     }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ============ 카테고리 & 구조 정의 ============
+# ============ 상수 정의 ============
 
-CATEGORIES = {
-    "자기계발": {
-        "id": "22",
-        "keywords": ["성공", "습관", "독서", "생산성", "마인드셋", "동기부여", "목표", "시간관리"],
-        "style": "동기부여형, 실용적 팁 제공",
-        "target": "20-40대 직장인, 대학생"
+# 언어/지역 설정
+REGIONS = {
+    "한국어": {
+        "countries": {"한국": "KR"},
+        "language": "ko",
+        "trends_geo": "KR",
+        "trends_pn": "south_korea"
     },
-    "역사": {
-        "id": "27",
-        "keywords": ["역사", "한국사", "세계사", "전쟁", "인물", "문명", "왕조", "사건"],
-        "style": "스토리텔링형, 드라마틱한 전개",
-        "target": "역사에 관심 있는 전연령"
+    "영어": {
+        "countries": {"미국": "US", "영국": "GB", "호주": "AU", "캐나다": "CA"},
+        "language": "en",
+        "trends_geo": "US",
+        "trends_pn": "united_states"
     },
-    "과학": {
-        "id": "28",
-        "keywords": ["과학", "우주", "물리", "생물", "기술", "발명", "연구", "실험"],
-        "style": "호기심 유발형, 쉬운 설명",
-        "target": "과학에 관심 있는 10-40대"
+    "일본어": {
+        "countries": {"일본": "JP"},
+        "language": "ja",
+        "trends_geo": "JP",
+        "trends_pn": "japan"
     },
-    "경제/시사": {
-        "id": "25",
-        "keywords": ["경제", "주식", "부동산", "금리", "정책", "국제", "트렌드", "분석"],
-        "style": "분석형, 인사이트 제공",
-        "target": "경제/시사에 관심 있는 20-50대"
+    "스페인어": {
+        "countries": {"스페인": "ES", "멕시코": "MX", "아르헨티나": "AR"},
+        "language": "es",
+        "trends_geo": "ES",
+        "trends_pn": "spain"
     },
-    "IT/기술": {
-        "id": "28",
-        "keywords": ["AI", "프로그래밍", "스타트업", "앱", "소프트웨어", "IT", "개발", "테크"],
-        "style": "트렌드 분석형, 실용 정보",
-        "target": "IT 관심 있는 20-40대"
+    "중국어 (번체)": {
+        "countries": {"대만": "TW", "홍콩": "HK"},
+        "language": "zh-TW",
+        "trends_geo": "TW",
+        "trends_pn": "taiwan"
     },
-    "건강/라이프": {
-        "id": "26",
-        "keywords": ["건강", "운동", "다이어트", "식단", "수면", "멘탈", "웰빙", "루틴"],
-        "style": "정보 전달형, 실천 가이드",
-        "target": "건강 관심 있는 전연령"
+    "포르투갈어": {
+        "countries": {"브라질": "BR", "포르투갈": "PT"},
+        "language": "pt",
+        "trends_geo": "BR",
+        "trends_pn": "brazil"
     },
-    "육아/교육": {
-        "id": "22",
-        "keywords": ["육아", "교육", "아이", "발달", "학습", "부모", "놀이", "성장"],
-        "style": "공감형, 실용 팁 제공",
-        "target": "영유아~초등 자녀를 둔 부모"
+    "프랑스어": {
+        "countries": {"프랑스": "FR", "캐나다 (퀘벡)": "CA"},
+        "language": "fr",
+        "trends_geo": "FR",
+        "trends_pn": "france"
+    },
+    "독일어": {
+        "countries": {"독일": "DE", "오스트리아": "AT"},
+        "language": "de",
+        "trends_geo": "DE",
+        "trends_pn": "germany"
     }
 }
 
-VIDEO_STRUCTURES = {
-    "숏폼 (1분)": {
-        "total_seconds": 60,
-        "structure": [
-            {"type": "hook", "duration": 5, "description": "강력한 훅"},
-            {"type": "content", "duration": 45, "description": "핵심 내용"},
-            {"type": "cta", "duration": 10, "description": "구독 유도"}
-        ]
-    },
-    "미드폼 (5분)": {
-        "total_seconds": 300,
-        "structure": [
-            {"type": "hook", "duration": 15, "description": "훅 + 미리보기"},
-            {"type": "intro", "duration": 20, "description": "주제 소개"},
-            {"type": "content_1", "duration": 80, "description": "핵심 포인트 1"},
-            {"type": "content_2", "duration": 80, "description": "핵심 포인트 2"},
-            {"type": "content_3", "duration": 60, "description": "핵심 포인트 3"},
-            {"type": "summary", "duration": 25, "description": "요약"},
-            {"type": "cta", "duration": 20, "description": "구독 유도"}
-        ]
-    },
-    "롱폼 (10분)": {
-        "total_seconds": 600,
-        "structure": [
-            {"type": "hook", "duration": 20, "description": "강력한 훅"},
-            {"type": "intro", "duration": 40, "description": "주제 소개"},
-            {"type": "content_1", "duration": 120, "description": "핵심 포인트 1"},
-            {"type": "content_2", "duration": 120, "description": "핵심 포인트 2"},
-            {"type": "content_3", "duration": 120, "description": "핵심 포인트 3"},
-            {"type": "deep_dive", "duration": 80, "description": "심층 분석"},
-            {"type": "summary", "duration": 40, "description": "요약"},
-            {"type": "cta", "duration": 30, "description": "구독 유도"},
-            {"type": "outro", "duration": 30, "description": "다음 예고"}
-        ]
-    },
-    "롱폼 (15분+)": {
-        "total_seconds": 900,
-        "structure": [
-            {"type": "cold_open", "duration": 15, "description": "콜드 오픈"},
-            {"type": "hook", "duration": 25, "description": "훅 + 미리보기"},
-            {"type": "intro", "duration": 50, "description": "배경 설명"},
-            {"type": "content_1", "duration": 150, "description": "챕터 1"},
-            {"type": "content_2", "duration": 150, "description": "챕터 2"},
-            {"type": "content_3", "duration": 150, "description": "챕터 3"},
-            {"type": "content_4", "duration": 120, "description": "챕터 4"},
-            {"type": "analysis", "duration": 100, "description": "종합 분석"},
-            {"type": "takeaway", "duration": 60, "description": "실천 포인트"},
-            {"type": "summary", "duration": 40, "description": "핵심 요약"},
-            {"type": "cta", "duration": 40, "description": "구독 유도"}
-        ]
-    }
+# 카테고리 (YouTube 공식 카테고리 ID)
+CATEGORIES = {
+    "전체": None,
+    "엔터테인먼트": "24",
+    "음악": "10",
+    "게임": "20",
+    "스포츠": "17",
+    "뉴스/정치": "25",
+    "교육": "27",
+    "과학/기술": "28",
+    "여행/이벤트": "19",
+    "인물/블로그": "22",
+    "코미디": "23",
+    "영화/애니메이션": "1",
+    "자동차": "2",
+    "하우투/스타일": "26",
+    "비영리/사회운동": "29",
+    "동물": "15"
+}
+
+# 기간 설정
+TIME_PERIODS = {
+    "어제": 1,
+    "최근 3일": 3,
+    "최근 7일": 7,
+    "최근 30일": 30,
+    "최근 90일": 90
+}
+
+# Google Trends 기간 매핑
+TRENDS_TIMEFRAMES = {
+    "어제": "now 1-d",
+    "최근 3일": "now 4-d",
+    "최근 7일": "now 7-d",
+    "최근 30일": "today 1-m",
+    "최근 90일": "today 3-m"
+}
+
+# 국가 코드 → Trends pn 매핑
+COUNTRY_TO_PN = {
+    "KR": "south_korea", "US": "united_states", "GB": "united_kingdom",
+    "JP": "japan", "ES": "spain", "MX": "mexico", "BR": "brazil",
+    "FR": "france", "DE": "germany", "TW": "taiwan", "CA": "canada",
+    "AU": "australia", "AR": "argentina", "PT": "portugal", "AT": "austria",
+    "HK": "hong_kong"
 }
 
 
 # ============ 유틸리티 함수 ============
 
-def estimate_speech_duration(text: str, wpm: int = 150) -> float:
-    """텍스트 읽기 시간 추정 (초)"""
-    korean_chars = len(re.findall(r'[가-힣]', text))
-    other_chars = len(text) - korean_chars
-    korean_minutes = korean_chars / 300
-    other_minutes = (other_chars / 5) / wpm
-    return (korean_minutes + other_minutes) * 60
+def format_number(num: int) -> str:
+    """숫자를 읽기 쉬운 형식으로 변환"""
+    if num >= 1_000_000_000:
+        return f"{num/1_000_000_000:.1f}B"
+    elif num >= 1_000_000:
+        return f"{num/1_000_000:.1f}M"
+    elif num >= 1_000:
+        return f"{num/1_000:.1f}K"
+    return str(num)
 
 
-def format_duration(seconds: float) -> str:
-    """초를 MM:SS 형식으로 변환"""
-    minutes = int(seconds // 60)
-    secs = int(seconds % 60)
-    return f"{minutes}:{secs:02d}"
+def parse_duration(duration: str) -> int:
+    """ISO 8601 기간을 초로 변환"""
+    if not duration:
+        return 0
+    match = re.match(r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?', duration)
+    if not match:
+        return 0
+    hours = int(match.group(1) or 0)
+    minutes = int(match.group(2) or 0)
+    seconds = int(match.group(3) or 0)
+    return hours * 3600 + minutes * 60 + seconds
 
 
-def get_api_keys():
-    """API 키 가져오기 (환경변수 또는 세션)"""
-    # 환경변수에서 먼저 확인 (Streamlit Cloud secrets)
-    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "") or st.session_state.get("anthropic_key", "")
-    youtube_key = os.getenv("YOUTUBE_API_KEY", "") or st.session_state.get("youtube_key", "")
+def format_duration(seconds: int) -> str:
+    """초를 MM:SS 또는 HH:MM:SS 형식으로 변환"""
+    if seconds >= 3600:
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        secs = seconds % 60
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    else:
+        minutes = seconds // 60
+        secs = seconds % 60
+        return f"{minutes}:{secs:02d}"
+
+
+def extract_keywords(titles: List[str], top_n: int = 20) -> List[Tuple[str, int]]:
+    """제목들에서 키워드 추출"""
+    stopwords = {'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 
+                 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will',
+                 'would', 'could', 'should', 'to', 'of', 'in', 'for', 'on', 
+                 'with', 'at', 'by', 'from', 'or', 'and', 'but', 'not', 
+                 'this', 'that', 'it', 'its', 'i', 'me', 'my', 'we', 'our', 
+                 'you', 'your', 'he', 'she', 'they', 'them', 'his', 'her',
+                 '이', '그', '저', '것', '수', '등', '및', '을', '를', '에', 
+                 '의', '가', '은', '는', '으로', '로', '에서', '와', '과', '도',
+                 '만', '에게', '한', '하는', '있는', '없는', '된', '되는', '더'}
     
-    return anthropic_key, youtube_key
-
-
-# ============ 트렌드 분석 클래스 ============
-
-class TrendAnalyzer:
-    """트렌드 분석기"""
+    all_words = []
+    for title in titles:
+        cleaned = re.sub(r'[^\w\s가-힣]', ' ', title.lower())
+        words = cleaned.split()
+        words = [w for w in words if len(w) >= 2 and w not in stopwords]
+        all_words.extend(words)
     
-    def __init__(self, youtube_api_key: str = None, anthropic_api_key: str = None):
-        self.youtube_api_key = youtube_api_key
-        self.anthropic_api_key = anthropic_api_key
-        
-        if youtube_api_key and YOUTUBE_API_AVAILABLE:
+    return Counter(all_words).most_common(top_n)
+
+
+def analyze_title_pattern(title: str) -> Dict:
+    """제목 패턴 분석"""
+    patterns = {
+        "has_number": bool(re.search(r'\d+', title)),
+        "has_question": '?' in title or title.endswith('까') or title.endswith('요'),
+        "has_emoji": bool(re.search(r'[^\w\s가-힣a-zA-Z0-9.,!?\'"-]', title)),
+        "has_bracket": bool(re.search(r'[\[\]【】\(\)]', title)),
+        "length": len(title),
+        "word_count": len(title.split())
+    }
+    
+    emotion_keywords = ['충격', '놀라운', '최고', '비밀', '진실', '반전', '필수', '꼭', 
+                       '드디어', '결국', '실화', '레전드', 'ㄷㄷ', 'ㅋㅋ', '대박', '미쳤',
+                       'shocking', 'amazing', 'best', 'secret', 'truth', 'must', 'wow']
+    patterns["has_emotion"] = any(kw in title.lower() for kw in emotion_keywords)
+    
+    return patterns
+
+
+def calculate_engagement(views: int, likes: int, comments: int) -> Dict:
+    """참여율 계산"""
+    if views == 0:
+        return {"like_rate": 0, "comment_rate": 0, "engagement_rate": 0}
+    
+    like_rate = (likes / views) * 100
+    comment_rate = (comments / views) * 100
+    engagement_rate = ((likes + comments) / views) * 100
+    
+    return {
+        "like_rate": round(like_rate, 2),
+        "comment_rate": round(comment_rate, 4),
+        "engagement_rate": round(engagement_rate, 2)
+    }
+
+
+# ============ YouTube API 클래스 ============
+
+class YouTubeAnalyzer:
+    """YouTube 분석기"""
+    
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        if YOUTUBE_API_AVAILABLE and api_key:
             try:
-                self.youtube = build("youtube", "v3", developerKey=youtube_api_key)
+                self.youtube = build("youtube", "v3", developerKey=api_key)
             except Exception as e:
                 self.youtube = None
                 st.error(f"YouTube API 초기화 실패: {e}")
         else:
             self.youtube = None
+    
+    def get_trending_videos(self, region_code: str = "KR", category_id: str = None, max_results: int = 50) -> List[Dict]:
+        """인기 급상승 영상 조회"""
+        if not self.youtube:
+            return []
+        
+        try:
+            params = {
+                "part": "snippet,statistics,contentDetails",
+                "chart": "mostPopular",
+                "regionCode": region_code,
+                "maxResults": min(max_results, 50)
+            }
+            if category_id:
+                params["videoCategoryId"] = category_id
             
-        if anthropic_api_key and ANTHROPIC_AVAILABLE:
-            self.claude = anthropic.Anthropic(api_key=anthropic_api_key)
-        else:
-            self.claude = None
+            response = self.youtube.videos().list(**params).execute()
+            return [self._parse_video(item) for item in response.get("items", [])]
+        except Exception as e:
+            st.error(f"인기 영상 조회 오류: {e}")
+            return []
+    
+    def search_videos(self, query: str, region_code: str = "KR", language: str = "ko",
+                      published_after: datetime = None, max_results: int = 50, order: str = "viewCount") -> List[Dict]:
+        """키워드로 영상 검색"""
+        if not self.youtube:
+            return []
+        
+        try:
+            params = {
+                "part": "snippet",
+                "q": query,
+                "type": "video",
+                "regionCode": region_code,
+                "relevanceLanguage": language,
+                "order": order,
+                "maxResults": min(max_results, 50)
+            }
+            if published_after:
+                params["publishedAfter"] = published_after.strftime("%Y-%m-%dT%H:%M:%SZ")
             
+            search_response = self.youtube.search().list(**params).execute()
+            video_ids = [item["id"]["videoId"] for item in search_response.get("items", [])]
+            
+            if not video_ids:
+                return []
+            
+            videos_response = self.youtube.videos().list(
+                part="snippet,statistics,contentDetails",
+                id=",".join(video_ids)
+            ).execute()
+            
+            videos = [self._parse_video(item) for item in videos_response.get("items", [])]
+            return sorted(videos, key=lambda x: x.get("views", 0), reverse=True)
+        except Exception as e:
+            st.error(f"검색 오류: {e}")
+            return []
+    
+    def get_channel_info(self, channel_id: str) -> Dict:
+        """채널 정보 조회"""
+        if not self.youtube:
+            return {}
+        
+        try:
+            response = self.youtube.channels().list(
+                part="snippet,statistics,contentDetails",
+                id=channel_id
+            ).execute()
+            
+            if not response.get("items"):
+                return {}
+            
+            channel = response["items"][0]
+            return {
+                "id": channel["id"],
+                "title": channel["snippet"]["title"],
+                "description": channel["snippet"].get("description", "")[:200],
+                "thumbnail": channel["snippet"]["thumbnails"].get("high", {}).get("url", ""),
+                "subscribers": int(channel["statistics"].get("subscriberCount", 0)),
+                "total_views": int(channel["statistics"].get("viewCount", 0)),
+                "video_count": int(channel["statistics"].get("videoCount", 0)),
+                "created_at": channel["snippet"].get("publishedAt", ""),
+                "uploads_playlist": channel["contentDetails"]["relatedPlaylists"]["uploads"]
+            }
+        except Exception as e:
+            st.error(f"채널 조회 오류: {e}")
+            return {}
+    
+    def get_channel_videos(self, channel_id: str, max_results: int = 30) -> List[Dict]:
+        """채널의 최근 영상 조회"""
+        if not self.youtube:
+            return []
+        
+        try:
+            channel_info = self.get_channel_info(channel_id)
+            if not channel_info:
+                return []
+            
+            playlist_id = channel_info.get("uploads_playlist")
+            if not playlist_id:
+                return []
+            
+            playlist_response = self.youtube.playlistItems().list(
+                part="snippet",
+                playlistId=playlist_id,
+                maxResults=min(max_results, 50)
+            ).execute()
+            
+            video_ids = [item["snippet"]["resourceId"]["videoId"] for item in playlist_response.get("items", [])]
+            
+            if not video_ids:
+                return []
+            
+            videos_response = self.youtube.videos().list(
+                part="snippet,statistics,contentDetails",
+                id=",".join(video_ids)
+            ).execute()
+            
+            return [self._parse_video(item) for item in videos_response.get("items", [])]
+        except Exception as e:
+            st.error(f"채널 영상 조회 오류: {e}")
+            return []
+    
+    def get_channel_id_from_url(self, url: str) -> Optional[str]:
+        """URL에서 채널 ID 추출"""
+        if not self.youtube:
+            return None
+        
+        if "/channel/" in url:
+            return url.split("/channel/")[1].split("/")[0].split("?")[0]
+        
+        if "/@" in url:
+            handle = url.split("/@")[1].split("/")[0].split("?")[0]
+            try:
+                response = self.youtube.search().list(part="snippet", q=handle, type="channel", maxResults=1).execute()
+                if response.get("items"):
+                    return response["items"][0]["snippet"]["channelId"]
+            except:
+                pass
+        
+        if "/c/" in url:
+            custom_name = url.split("/c/")[1].split("/")[0].split("?")[0]
+            try:
+                response = self.youtube.search().list(part="snippet", q=custom_name, type="channel", maxResults=1).execute()
+                if response.get("items"):
+                    return response["items"][0]["snippet"]["channelId"]
+            except:
+                pass
+        
+        return None
+    
+    def _parse_video(self, item: Dict) -> Dict:
+        """영상 데이터 파싱"""
+        snippet = item.get("snippet", {})
+        stats = item.get("statistics", {})
+        content = item.get("contentDetails", {})
+        
+        views = int(stats.get("viewCount", 0))
+        likes = int(stats.get("likeCount", 0))
+        comments = int(stats.get("commentCount", 0))
+        duration_seconds = parse_duration(content.get("duration", ""))
+        
+        engagement = calculate_engagement(views, likes, comments)
+        title = snippet.get("title", "")
+        title_patterns = analyze_title_pattern(title)
+        
+        published_at = snippet.get("publishedAt", "")
+        upload_datetime = None
+        if published_at:
+            try:
+                upload_datetime = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+            except:
+                pass
+        
+        return {
+            "video_id": item.get("id") if isinstance(item.get("id"), str) else item.get("id", {}).get("videoId", ""),
+            "title": title,
+            "channel_title": snippet.get("channelTitle", ""),
+            "channel_id": snippet.get("channelId", ""),
+            "description": snippet.get("description", "")[:300],
+            "thumbnail": snippet.get("thumbnails", {}).get("high", {}).get("url", ""),
+            "published_at": published_at,
+            "upload_datetime": upload_datetime,
+            "upload_day": upload_datetime.strftime("%A") if upload_datetime else "",
+            "upload_hour": upload_datetime.hour if upload_datetime else 0,
+            "views": views,
+            "likes": likes,
+            "comments": comments,
+            "duration_seconds": duration_seconds,
+            "duration_formatted": format_duration(duration_seconds),
+            "like_rate": engagement["like_rate"],
+            "comment_rate": engagement["comment_rate"],
+            "engagement_rate": engagement["engagement_rate"],
+            "title_patterns": title_patterns
+        }
+
+
+# ============ Google Trends 클래스 ============
+
+class TrendsAnalyzer:
+    """Google Trends 분석기"""
+    
+    def __init__(self):
         if PYTRENDS_AVAILABLE:
             try:
-                self.pytrends = TrendReq(hl='ko-KR', tz=540)
+                self.pytrends = TrendReq(hl='ko', tz=540, timeout=(10, 25))
             except:
                 self.pytrends = None
         else:
             self.pytrends = None
     
-    def search_trending_videos(self, category: str, max_results: int = 15) -> List[Dict]:
-        """카테고리별 트렌딩 영상 검색"""
-        if not self.youtube:
+    def get_trending_searches(self, country_code: str = "KR") -> List[str]:
+        """실시간 급상승 검색어"""
+        if not self.pytrends:
             return []
         
-        category_info = CATEGORIES.get(category, {})
-        keywords = category_info.get("keywords", [])
-        all_videos = []
+        pn = COUNTRY_TO_PN.get(country_code, "south_korea")
         
-        # 인기 영상 조회
         try:
-            trending_response = self.youtube.videos().list(
-                part="snippet,statistics,contentDetails",
-                chart="mostPopular",
-                regionCode="KR",
-                videoCategoryId=category_info.get("id", "22"),
-                maxResults=min(max_results, 10)
-            ).execute()
-            
-            for item in trending_response.get("items", []):
-                all_videos.append(self._parse_video_item(item))
+            trending = self.pytrends.trending_searches(pn=pn)
+            return trending[0].tolist()[:20] if not trending.empty else []
         except Exception as e:
-            st.warning(f"인기 영상 조회 실패: {e}")
-        
-        # 키워드별 검색
-        for keyword in keywords[:2]:
-            try:
-                search_response = self.youtube.search().list(
-                    part="snippet",
-                    q=keyword,
-                    type="video",
-                    order="viewCount",
-                    publishedAfter=(datetime.now() - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    regionCode="KR",
-                    maxResults=5
-                ).execute()
-                
-                video_ids = [item["id"]["videoId"] for item in search_response.get("items", [])]
-                
-                if video_ids:
-                    stats_response = self.youtube.videos().list(
-                        part="snippet,statistics,contentDetails",
-                        id=",".join(video_ids)
-                    ).execute()
-                    
-                    for item in stats_response.get("items", []):
-                        all_videos.append(self._parse_video_item(item))
-                        
-            except Exception as e:
-                continue
-        
-        # 중복 제거
-        seen = set()
-        unique_videos = []
-        for v in all_videos:
-            if v["video_id"] not in seen:
-                seen.add(v["video_id"])
-                unique_videos.append(v)
-        
-        return sorted(unique_videos, key=lambda x: x.get("views", 0), reverse=True)[:max_results]
+            return []
     
-    def _parse_video_item(self, item: Dict) -> Dict:
-        """영상 아이템 파싱"""
-        snippet = item.get("snippet", {})
-        stats = item.get("statistics", {})
-        
-        video_id = item.get("id")
-        if isinstance(video_id, dict):
-            video_id = video_id.get("videoId", "")
-        
-        return {
-            "video_id": video_id,
-            "title": snippet.get("title", ""),
-            "channel": snippet.get("channelTitle", ""),
-            "description": snippet.get("description", "")[:200],
-            "published_at": snippet.get("publishedAt", ""),
-            "views": int(stats.get("viewCount", 0)),
-            "likes": int(stats.get("likeCount", 0)),
-            "comments": int(stats.get("commentCount", 0)),
-            "thumbnail": snippet.get("thumbnails", {}).get("high", {}).get("url", "")
-        }
-    
-    def get_keyword_trends(self, keywords: List[str]) -> Dict:
-        """키워드 트렌드"""
-        if not self.pytrends:
-            return {"error": "Google Trends를 사용할 수 없습니다.", "rising_keywords": []}
+    def get_related_queries(self, keywords: List[str], geo: str = "KR", timeframe: str = "today 1-m") -> Dict:
+        """관련 검색어 조회"""
+        if not self.pytrends or not keywords:
+            return {"rising": [], "top": []}
         
         try:
-            self.pytrends.build_payload(keywords[:5], cat=0, timeframe='today 3-m', geo='KR')
-            related_queries = self.pytrends.related_queries()
+            self.pytrends.build_payload(keywords[:5], cat=0, timeframe=timeframe, geo=geo)
+            related = self.pytrends.related_queries()
             
-            rising_keywords = []
+            result = {"rising": [], "top": []}
             for kw in keywords[:5]:
-                if kw in related_queries and related_queries[kw].get("rising") is not None:
-                    rising = related_queries[kw]["rising"]
-                    if not rising.empty:
-                        rising_keywords.extend(rising["query"].tolist()[:5])
+                if kw in related:
+                    if related[kw].get("rising") is not None and not related[kw]["rising"].empty:
+                        result["rising"].extend(related[kw]["rising"]["query"].tolist()[:10])
+                    if related[kw].get("top") is not None and not related[kw]["top"].empty:
+                        result["top"].extend(related[kw]["top"]["query"].tolist()[:10])
             
-            return {
-                "keywords": keywords,
-                "rising_keywords": list(set(rising_keywords))[:15]
-            }
-        except Exception as e:
-            return {"error": str(e), "rising_keywords": []}
+            result["rising"] = list(dict.fromkeys(result["rising"]))[:15]
+            result["top"] = list(dict.fromkeys(result["top"]))[:15]
+            return result
+        except:
+            return {"rising": [], "top": []}
     
-    def predict_views(self, title: str, category: str, competitor_avg: int = 10000) -> Dict:
-        """조회수 예측"""
-        score = 50
-        factors = []
-        
-        title_len = len(title)
-        if 30 <= title_len <= 60:
-            score += 10
-            factors.append("✅ 적절한 제목 길이")
-        elif title_len > 80:
-            score -= 10
-            factors.append("⚠️ 제목이 너무 김")
-        
-        if re.search(r'\d+', title):
-            score += 10
-            factors.append("✅ 숫자 포함")
-        
-        emotion_words = ["충격", "놀라운", "최고", "비밀", "진실", "반전", "필수", "꼭", "드디어", "결국"]
-        if any(word in title for word in emotion_words):
-            score += 15
-            factors.append("✅ 감정 유발 키워드")
-        
-        if "?" in title or title.endswith("까") or title.endswith("요"):
-            score += 5
-            factors.append("✅ 질문/대화형 제목")
-        
-        predicted_views = int(competitor_avg * (score / 50))
-        
-        return {
-            "score": min(score, 100),
-            "predicted_views": predicted_views,
-            "predicted_views_range": f"{int(predicted_views * 0.5):,} ~ {int(predicted_views * 1.5):,}",
-            "factors": factors,
-            "grade": "🔥 높음" if score >= 70 else "👍 중간" if score >= 50 else "😐 낮음"
-        }
-    
-    def generate_ai_insights(self, category: str, trending_videos: List[Dict]) -> str:
-        """AI 인사이트 생성"""
-        if not self.claude:
-            return "⚠️ Anthropic API 키가 없어 AI 분석을 사용할 수 없습니다."
-        
-        prompt = f"""
-유튜브 콘텐츠 전략 전문가로서 아래 데이터를 분석해주세요.
-
-## 카테고리: {category}
-
-## 현재 트렌딩 영상 TOP 10
-{json.dumps(trending_videos[:10], ensure_ascii=False, indent=2)}
-
-## 분석 요청
-1. **현재 트렌드 요약**: 어떤 주제가 인기인가요?
-2. **성공 패턴**: 조회수 높은 영상의 공통점 (제목, 주제)
-3. **추천 콘텐츠 아이디어 5개**: 구체적인 제목까지 제안
-4. **차별화 전략**: 경쟁에서 이기려면?
-
-한국어로 실용적인 인사이트를 제공해주세요. 각 섹션을 명확히 구분해주세요.
-"""
+    def get_interest_over_time(self, keywords: List[str], geo: str = "KR", timeframe: str = "today 1-m") -> pd.DataFrame:
+        """시간별 관심도 추이"""
+        if not self.pytrends or not keywords:
+            return pd.DataFrame()
         
         try:
-            response = self.claude.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=1500,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            return response.content[0].text
-        except Exception as e:
-            return f"⚠️ AI 분석 중 오류: {str(e)}"
-
-
-# ============ 대본 생성 클래스 ============
-
-class ScriptGenerator:
-    """대본 생성기"""
-    
-    def __init__(self, anthropic_api_key: str = None):
-        if anthropic_api_key and ANTHROPIC_AVAILABLE:
-            self.claude = anthropic.Anthropic(api_key=anthropic_api_key)
-        else:
-            self.claude = None
-    
-    def generate_script(
-        self,
-        topic: str,
-        category: str,
-        video_length: str,
-        competitor_titles: List[str] = None,
-        keywords: List[str] = None,
-        style_notes: str = ""
-    ) -> Dict:
-        """대본 생성"""
-        
-        if not self.claude:
-            return {"error": "Anthropic API 키가 필요합니다."}
-        
-        category_info = CATEGORIES.get(category, {})
-        structure = VIDEO_STRUCTURES.get(video_length, VIDEO_STRUCTURES["미드폼 (5분)"])
-        
-        competitor_context = ""
-        if competitor_titles:
-            competitor_context = f"""
-## 경쟁 영상 제목 (벤치마킹)
-{chr(10).join(f'- {t}' for t in competitor_titles[:8])}
-"""
-        
-        keyword_context = ""
-        if keywords:
-            keyword_context = f"""
-## SEO 타겟 키워드
-{', '.join(keywords[:10])}
-"""
-        
-        prompt = f"""
-유튜브 정보성 콘텐츠 전문 작가입니다. 아래 조건에 맞는 영상 대본을 작성해주세요.
-
-## 주제
-{topic}
-
-## 카테고리: {category}
-- 타겟 시청자: {category_info.get('target', '일반 대중')}
-- 스타일: {category_info.get('style', '정보 전달형')}
-
-## 영상 길이: {video_length} (총 {structure['total_seconds']}초)
-{competitor_context}
-{keyword_context}
-
-## 추가 요청: {style_notes if style_notes else '없음'}
-
-## 대본 구조
-{json.dumps(structure['structure'], ensure_ascii=False, indent=2)}
-
-## 응답 형식 (반드시 JSON)
-{{
-    "seo": {{
-        "title_options": ["제목1 (50자 이내)", "제목2", "제목3"],
-        "description": "영상 설명 (300자)",
-        "tags": ["태그1", "태그2", "태그3", "태그4", "태그5"],
-        "hashtags": ["#해시태그1", "#해시태그2", "#해시태그3"]
-    }},
-    "hooks": {{
-        "hook_1": "충격적 사실형 훅 (한 문장)",
-        "hook_2": "질문형 훅 (한 문장)",
-        "hook_3": "스토리형 훅 (한 문장)"
-    }},
-    "scenes": [
-        {{
-            "scene_number": 1,
-            "scene_type": "hook",
-            "target_duration": 15,
-            "narration": "나레이션 전문 (target_duration에 맞게, 한글 기준 분당 300자)",
-            "on_screen_text": "화면에 띄울 핵심 텍스트",
-            "visual_note": "어떤 이미지/영상이 필요한지"
-        }}
-    ],
-    "key_messages": ["핵심 메시지1", "핵심 메시지2", "핵심 메시지3"]
-}}
-
-중요:
-1. 각 장면 나레이션은 target_duration에 맞춰 작성 (한글 분당 300자 기준)
-2. 훅은 5초 안에 시청자를 사로잡아야 함
-3. SEO 제목은 핵심 키워드를 앞에 배치
-4. JSON만 반환 (다른 텍스트 없이)
-"""
-        
-        try:
-            response = self.claude.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=4000,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            
-            content = response.content[0].text
-            
-            # JSON 파싱
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0]
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0]
-            
-            script_data = json.loads(content.strip())
-            
-            # 읽기 시간 계산
-            total_duration = 0
-            for scene in script_data.get("scenes", []):
-                narration = scene.get("narration", "")
-                estimated = estimate_speech_duration(narration)
-                scene["estimated_duration"] = round(estimated, 1)
-                scene["duration_display"] = format_duration(estimated)
-                total_duration += estimated
-            
-            script_data["total_duration"] = round(total_duration, 1)
-            script_data["total_display"] = format_duration(total_duration)
-            
-            return script_data
-            
-        except json.JSONDecodeError as e:
-            return {"error": f"JSON 파싱 오류: {str(e)}", "raw": content if 'content' in dir() else ""}
-        except Exception as e:
-            return {"error": str(e)}
+            self.pytrends.build_payload(keywords[:5], cat=0, timeframe=timeframe, geo=geo)
+            return self.pytrends.interest_over_time()
+        except:
+            return pd.DataFrame()
 
 
 # ============ 메인 UI ============
 
 def main():
-    # 헤더
-    st.markdown('<h1 class="main-header">🎬 YouTube 콘텐츠 제작 도우미</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">AI 기반 트렌드 분석 + 대본 자동 생성</p>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">🎬 YouTube 콘텐츠 제작 도우미 v3.0</h1>', unsafe_allow_html=True)
+    st.markdown('<p style="text-align:center;color:#666;">글로벌 트렌드 분석 + AI 대본 생성 + 경쟁 채널 분석</p>', unsafe_allow_html=True)
     
-    # 사이드바
+    # ============ 사이드바 ============
     with st.sidebar:
         st.header("⚙️ 설정")
         
-        # API 키 입력
+        # API 키
         st.subheader("🔑 API 키")
-        
-        # 환경변수에서 가져오기 시도
-        default_anthropic = os.getenv("ANTHROPIC_API_KEY", "")
-        default_youtube = os.getenv("YOUTUBE_API_KEY", "")
-        
-        anthropic_key = st.text_input(
-            "Anthropic API Key",
-            value=default_anthropic,
-            type="password",
-            help="대본 생성에 필요"
-        )
-        
-        youtube_key = st.text_input(
-            "YouTube API Key", 
-            value=default_youtube,
-            type="password",
-            help="트렌드 분석에 필요"
-        )
-        
-        # 세션에 저장
-        st.session_state["anthropic_key"] = anthropic_key
-        st.session_state["youtube_key"] = youtube_key
+        youtube_key = st.text_input("YouTube API Key", type="password", value=os.getenv("YOUTUBE_API_KEY", ""))
+        anthropic_key = st.text_input("Anthropic API Key", type="password", value=os.getenv("ANTHROPIC_API_KEY", ""))
         
         st.divider()
         
-        # 카테고리 선택
-        st.subheader("📂 콘텐츠 설정")
-        selected_category = st.selectbox(
-            "카테고리",
-            list(CATEGORIES.keys()),
-            help="채널의 주요 카테고리"
-        )
-        
-        video_length = st.selectbox(
-            "영상 길이",
-            list(VIDEO_STRUCTURES.keys()),
-            index=1
-        )
+        # 언어/지역
+        st.subheader("🌍 언어 / 지역")
+        selected_language = st.selectbox("언어", list(REGIONS.keys()))
+        countries = REGIONS[selected_language]["countries"]
+        selected_country_name = st.selectbox("국가", list(countries.keys()))
+        selected_country_code = countries[selected_country_name]
         
         st.divider()
         
-        # API 상태 표시
+        # 기간
+        st.subheader("📅 분석 기간")
+        selected_period = st.selectbox("기간", list(TIME_PERIODS.keys()))
+        days = TIME_PERIODS[selected_period]
+        
+        st.divider()
+        
+        # 카테고리
+        st.subheader("📂 카테고리")
+        selected_category = st.selectbox("카테고리", list(CATEGORIES.keys()))
+        category_id = CATEGORIES[selected_category]
+        
+        st.divider()
+        
+        # 연결 상태
         st.subheader("📡 연결 상태")
-        if anthropic_key:
-            st.success("✅ Anthropic 연결됨")
-        else:
-            st.warning("⚠️ Anthropic 키 필요")
-            
         if youtube_key:
             st.success("✅ YouTube 연결됨")
         else:
             st.warning("⚠️ YouTube 키 필요")
-    
-    # 메인 탭
-    tab1, tab2, tab3 = st.tabs(["📈 트렌드 분석", "📝 대본 생성", "📥 내보내기"])
-    
-    # ============ 탭 1: 트렌드 분석 ============
-    with tab1:
-        st.header("📈 트렌드 분석")
-        
-        if not youtube_key:
-            st.warning("👈 사이드바에서 YouTube API 키를 입력해주세요.")
-            st.info("""
-            **YouTube API 키 발급 방법:**
-            1. [Google Cloud Console](https://console.cloud.google.com/) 접속
-            2. 새 프로젝트 생성
-            3. "YouTube Data API v3" 검색 후 활성화
-            4. 사용자 인증 정보 > API 키 생성
-            """)
+        if anthropic_key:
+            st.success("✅ Anthropic 연결됨")
         else:
-            col1, col2 = st.columns([3, 1])
+            st.info("ℹ️ 대본 생성 시 필요")
+    
+    # ============ 메인 탭 ============
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "🔥 인기 영상", "📈 급상승 키워드", "🔍 키워드 검색", "📊 경쟁 채널", "📝 대본 생성"
+    ])
+    
+    # ============ 탭 1: 인기 영상 ============
+    with tab1:
+        st.header("🔥 기간별 인기 영상")
+        
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.info(f"🌍 **{selected_language}** > **{selected_country_name}** | 📂 **{selected_category}** | 📅 **{selected_period}**")
+        with col2:
+            analyze_btn = st.button("🔍 분석 시작", type="primary", use_container_width=True, key="trending_btn")
+        
+        if analyze_btn:
+            if not youtube_key:
+                st.error("YouTube API 키를 입력해주세요.")
+            else:
+                analyzer = YouTubeAnalyzer(youtube_key)
+                
+                with st.spinner("인기 영상 분석 중..."):
+                    videos = analyzer.get_trending_videos(
+                        region_code=selected_country_code,
+                        category_id=category_id,
+                        max_results=50
+                    )
+                
+                if videos:
+                    st.session_state["trending_videos"] = videos
+                    st.session_state["trending_region"] = selected_country_name
+                    st.success(f"✅ {len(videos)}개 영상 분석 완료!")
+                else:
+                    st.warning("영상을 가져올 수 없습니다.")
+        
+        if "trending_videos" in st.session_state:
+            videos = st.session_state["trending_videos"]
+            
+            # 통계 요약
+            st.subheader("📊 통계 요약")
+            col1, col2, col3, col4, col5 = st.columns(5)
+            
+            avg_views = sum(v["views"] for v in videos) / len(videos)
+            avg_likes = sum(v["like_rate"] for v in videos) / len(videos)
+            avg_duration = sum(v["duration_seconds"] for v in videos) / len(videos)
+            total_views = sum(v["views"] for v in videos)
+            
+            col1.metric("분석 영상", f"{len(videos)}개")
+            col2.metric("평균 조회수", format_number(int(avg_views)))
+            col3.metric("총 조회수", format_number(total_views))
+            col4.metric("평균 좋아요율", f"{avg_likes:.2f}%")
+            col5.metric("평균 길이", format_duration(int(avg_duration)))
+            
+            # 인기 키워드
+            st.subheader("🏷️ 제목에서 추출한 인기 키워드")
+            titles = [v["title"] for v in videos]
+            keywords = extract_keywords(titles, top_n=20)
+            keyword_html = " ".join([f'<span class="keyword-tag">{kw} ({count})</span>' for kw, count in keywords])
+            st.markdown(keyword_html, unsafe_allow_html=True)
+            
+            # 업로드 패턴
+            st.subheader("⏰ 업로드 패턴 분석")
+            col1, col2 = st.columns(2)
             
             with col1:
-                st.info(f"🎯 **{selected_category}** 카테고리의 트렌드를 분석합니다.")
+                st.write("**요일별 분포**")
+                days_count = Counter([v["upload_day"] for v in videos if v["upload_day"]])
+                if days_count:
+                    day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+                    day_df = pd.DataFrame([(d, days_count.get(d, 0)) for d in day_order], columns=["요일", "영상 수"])
+                    st.bar_chart(day_df.set_index("요일"))
             
             with col2:
-                analyze_btn = st.button("🔍 분석 시작", type="primary", use_container_width=True)
+                st.write("**시간대별 분포**")
+                hours_count = Counter([v["upload_hour"] for v in videos if v.get("upload_datetime")])
+                if hours_count:
+                    hour_df = pd.DataFrame([(h, hours_count.get(h, 0)) for h in range(24)], columns=["시간", "영상 수"])
+                    st.bar_chart(hour_df.set_index("시간"))
             
-            if analyze_btn:
-                analyzer = TrendAnalyzer(youtube_key, anthropic_key)
-                
-                with st.spinner("트렌드 데이터 수집 중..."):
-                    # 트렌딩 영상
-                    trending = analyzer.search_trending_videos(selected_category)
-                    st.session_state["trending_videos"] = trending
+            # 제목 패턴 분석
+            st.subheader("📝 성공하는 제목 패턴")
+            col1, col2, col3, col4, col5 = st.columns(5)
+            
+            num_with_number = sum(1 for v in videos if v['title_patterns']['has_number'])
+            num_with_question = sum(1 for v in videos if v['title_patterns']['has_question'])
+            num_with_emoji = sum(1 for v in videos if v['title_patterns']['has_emoji'])
+            num_with_emotion = sum(1 for v in videos if v['title_patterns']['has_emotion'])
+            avg_title_len = sum(v['title_patterns']['length'] for v in videos) / len(videos)
+            
+            col1.metric("🔢 숫자 포함", f"{num_with_number/len(videos)*100:.0f}%")
+            col2.metric("❓ 질문형", f"{num_with_question/len(videos)*100:.0f}%")
+            col3.metric("😀 이모지", f"{num_with_emoji/len(videos)*100:.0f}%")
+            col4.metric("💥 감정키워드", f"{num_with_emotion/len(videos)*100:.0f}%")
+            col5.metric("📏 평균 제목길이", f"{avg_title_len:.0f}자")
+            
+            # 영상 목록
+            st.subheader("🎬 인기 영상 TOP 20")
+            
+            for i, video in enumerate(videos[:20], 1):
+                with st.expander(f"{i}위. {video['title'][:55]}... ({format_number(video['views'])}회)"):
+                    col1, col2 = st.columns([1, 2])
                     
-                    # 키워드 트렌드
-                    keywords = CATEGORIES[selected_category]["keywords"]
-                    keyword_data = analyzer.get_keyword_trends(keywords)
-                    st.session_state["keyword_data"] = keyword_data
-                
-                st.success(f"✅ {len(trending)}개 영상 분석 완료!")
-            
-            # 결과 표시
-            if "trending_videos" in st.session_state and st.session_state["trending_videos"]:
-                trending = st.session_state["trending_videos"]
-                
-                st.subheader("🔥 인기 영상 TOP 10")
-                
-                for i, video in enumerate(trending[:10], 1):
-                    with st.expander(f"{i}. {video['title'][:60]}... ({video['views']:,}회)"):
-                        col1, col2 = st.columns([1, 2])
+                    with col1:
+                        if video.get("thumbnail"):
+                            st.image(video["thumbnail"], use_container_width=True)
+                        st.markdown(f"[▶️ 영상 보기](https://youtube.com/watch?v={video['video_id']})")
+                    
+                    with col2:
+                        st.write(f"**채널:** {video['channel_title']}")
+                        st.write(f"**조회수:** {video['views']:,}회")
                         
+                        col_a, col_b, col_c = st.columns(3)
+                        col_a.write(f"**좋아요:** {video['likes']:,}")
+                        col_b.write(f"**좋아요율:** {video['like_rate']:.2f}%")
+                        col_c.write(f"**댓글:** {video['comments']:,}")
+                        
+                        st.write(f"**영상 길이:** {video['duration_formatted']}")
+                        st.write(f"**업로드:** {video['published_at'][:10] if video['published_at'] else 'N/A'}")
+                        
+                        patterns = video['title_patterns']
+                        tags = []
+                        if patterns['has_number']: tags.append("🔢숫자")
+                        if patterns['has_question']: tags.append("❓질문형")
+                        if patterns['has_emoji']: tags.append("😀이모지")
+                        if patterns['has_emotion']: tags.append("💥감정")
+                        if tags:
+                            st.write(f"**제목 패턴:** {' '.join(tags)}")
+    
+    # ============ 탭 2: 급상승 키워드 ============
+    with tab2:
+        st.header("📈 급상승 키워드")
+        
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.info(f"🌍 **{selected_country_name}** 실시간 인기 검색어 (Google Trends + YouTube)")
+        with col2:
+            trends_btn = st.button("🔍 키워드 분석", type="primary", use_container_width=True, key="trends_btn")
+        
+        if trends_btn:
+            trends = TrendsAnalyzer()
+            
+            with st.spinner("급상승 키워드 분석 중..."):
+                trending_searches = trends.get_trending_searches(selected_country_code)
+                st.session_state["trending_searches"] = trending_searches
+                
+                # 카테고리별 기본 키워드
+                cat_keywords = {
+                    "전체": ["뉴스", "이슈", "트렌드"],
+                    "엔터테인먼트": ["드라마", "예능", "연예인"],
+                    "음악": ["노래", "음악", "뮤비"],
+                    "게임": ["게임", "롤", "스팀"],
+                    "교육": ["공부", "강의", "영어"],
+                    "과학/기술": ["AI", "기술", "과학"]
+                }
+                base_kw = cat_keywords.get(selected_category, ["트렌드"])
+                
+                related = trends.get_related_queries(base_kw, geo=selected_country_code, timeframe=TRENDS_TIMEFRAMES[selected_period])
+                st.session_state["related_queries"] = related
+            
+            st.success("✅ 키워드 분석 완료!")
+        
+        if "trending_searches" in st.session_state:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.subheader("🔥 실시간 급상승 검색어")
+                searches = st.session_state["trending_searches"]
+                if searches:
+                    for i, keyword in enumerate(searches[:15], 1):
+                        col_a, col_b = st.columns([3, 1])
+                        with col_a:
+                            st.write(f"**{i}. {keyword}**")
+                        with col_b:
+                            if st.button("🔍", key=f"search_trend_{i}"):
+                                st.session_state["quick_search"] = keyword
+                else:
+                    st.info("데이터를 가져올 수 없습니다. 나중에 다시 시도해주세요.")
+            
+            with col2:
+                st.subheader("📈 연관 키워드")
+                related = st.session_state.get("related_queries", {})
+                
+                if related.get("rising"):
+                    st.write("**🚀 급상승:**")
+                    for kw in related["rising"][:8]:
+                        st.write(f"• {kw}")
+                
+                if related.get("top"):
+                    st.write("**⭐ 인기:**")
+                    for kw in related["top"][:8]:
+                        st.write(f"• {kw}")
+        
+        # 키워드로 YouTube 검색
+        st.divider()
+        st.subheader("🎬 키워드별 인기 영상 찾기")
+        
+        quick_search = st.session_state.get("quick_search", "")
+        keyword_input = st.text_input("검색할 키워드", value=quick_search, placeholder="예: AI, 다이어트, 주식")
+        
+        if keyword_input and youtube_key:
+            if st.button("🎬 인기 영상 검색", key="kw_video_search"):
+                analyzer = YouTubeAnalyzer(youtube_key)
+                published_after = datetime.now() - timedelta(days=days)
+                
+                with st.spinner(f"'{keyword_input}' 검색 중..."):
+                    videos = analyzer.search_videos(
+                        query=keyword_input,
+                        region_code=selected_country_code,
+                        language=REGIONS[selected_language]["language"],
+                        published_after=published_after,
+                        max_results=20
+                    )
+                
+                if videos:
+                    st.success(f"✅ {len(videos)}개 영상!")
+                    
+                    for i, video in enumerate(videos[:10], 1):
+                        with st.expander(f"{i}. {video['title'][:45]}... ({format_number(video['views'])}회)"):
+                            col1, col2 = st.columns([1, 2])
+                            with col1:
+                                if video.get("thumbnail"):
+                                    st.image(video["thumbnail"], use_container_width=True)
+                            with col2:
+                                st.write(f"**채널:** {video['channel_title']}")
+                                st.write(f"**조회수:** {video['views']:,}")
+                                st.write(f"**좋아요율:** {video['like_rate']:.2f}%")
+                                st.write(f"**길이:** {video['duration_formatted']}")
+                                st.markdown(f"[▶️ 영상 보기](https://youtube.com/watch?v={video['video_id']})")
+    
+    # ============ 탭 3: 키워드 검색 ============
+    with tab3:
+        st.header("🔍 키워드 심층 검색")
+        
+        col1, col2, col3 = st.columns([2, 1, 1])
+        with col1:
+            search_keyword = st.text_input("검색 키워드", placeholder="예: 파이썬 강의", key="deep_kw")
+        with col2:
+            search_order = st.selectbox("정렬", ["조회수 순", "최신순", "관련성 순"])
+        with col3:
+            max_search = st.selectbox("결과 수", [10, 20, 30, 50])
+        
+        order_map = {"조회수 순": "viewCount", "최신순": "date", "관련성 순": "relevance"}
+        
+        if search_keyword and youtube_key:
+            if st.button("🔍 검색", type="primary", key="deep_search_btn"):
+                analyzer = YouTubeAnalyzer(youtube_key)
+                published_after = datetime.now() - timedelta(days=days)
+                
+                with st.spinner("검색 중..."):
+                    videos = analyzer.search_videos(
+                        query=search_keyword,
+                        region_code=selected_country_code,
+                        language=REGIONS[selected_language]["language"],
+                        published_after=published_after,
+                        max_results=max_search,
+                        order=order_map[search_order]
+                    )
+                
+                if videos:
+                    st.session_state["search_results"] = videos
+                    st.success(f"✅ {len(videos)}개 영상!")
+        
+        if "search_results" in st.session_state:
+            videos = st.session_state["search_results"]
+            
+            # 통계
+            st.subheader("📊 검색 결과 분석")
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("검색 결과", f"{len(videos)}개")
+            col2.metric("평균 조회수", format_number(int(sum(v['views'] for v in videos) / len(videos))))
+            col3.metric("평균 좋아요율", f"{sum(v['like_rate'] for v in videos) / len(videos):.2f}%")
+            col4.metric("평균 길이", format_duration(int(sum(v['duration_seconds'] for v in videos) / len(videos))))
+            
+            # 테이블
+            df = pd.DataFrame([{
+                "순위": i,
+                "제목": v["title"][:35] + "...",
+                "채널": v["channel_title"][:15],
+                "조회수": format_number(v["views"]),
+                "좋아요율": f"{v['like_rate']:.1f}%",
+                "길이": v["duration_formatted"]
+            } for i, v in enumerate(videos, 1)])
+            
+            st.dataframe(df, use_container_width=True, hide_index=True)
+            
+            # 상세
+            for i, video in enumerate(videos[:10], 1):
+                with st.expander(f"상세: {video['title'][:40]}..."):
+                    col1, col2 = st.columns([1, 2])
+                    with col1:
+                        if video.get("thumbnail"):
+                            st.image(video["thumbnail"], use_container_width=True)
+                    with col2:
+                        st.write(f"**채널:** {video['channel_title']}")
+                        st.write(f"**조회수:** {video['views']:,}")
+                        st.write(f"**좋아요:** {video['likes']:,} ({video['like_rate']:.2f}%)")
+                        st.write(f"**댓글:** {video['comments']:,}")
+                        st.write(f"**길이:** {video['duration_formatted']}")
+                        st.markdown(f"[▶️ 영상 보기](https://youtube.com/watch?v={video['video_id']})")
+    
+    # ============ 탭 4: 경쟁 채널 ============
+    with tab4:
+        st.header("📊 경쟁 채널 분석")
+        
+        channel_url = st.text_input("채널 URL", placeholder="https://www.youtube.com/@channelname")
+        
+        if channel_url and youtube_key:
+            if st.button("📊 채널 분석", type="primary", key="ch_analyze"):
+                analyzer = YouTubeAnalyzer(youtube_key)
+                
+                with st.spinner("채널 분석 중..."):
+                    channel_id = analyzer.get_channel_id_from_url(channel_url)
+                    
+                    if channel_id:
+                        info = analyzer.get_channel_info(channel_id)
+                        videos = analyzer.get_channel_videos(channel_id, max_results=30)
+                        
+                        st.session_state["ch_info"] = info
+                        st.session_state["ch_videos"] = videos
+                        st.success("✅ 분석 완료!")
+                    else:
+                        st.error("채널을 찾을 수 없습니다.")
+        
+        if "ch_info" in st.session_state:
+            info = st.session_state["ch_info"]
+            videos = st.session_state.get("ch_videos", [])
+            
+            # 채널 정보
+            st.subheader(f"📺 {info['title']}")
+            
+            col1, col2 = st.columns([1, 3])
+            with col1:
+                if info.get("thumbnail"):
+                    st.image(info["thumbnail"], width=150)
+            with col2:
+                c1, c2, c3 = st.columns(3)
+                c1.metric("구독자", format_number(info['subscribers']))
+                c2.metric("총 조회수", format_number(info['total_views']))
+                c3.metric("영상 수", format_number(info['video_count']))
+            
+            if videos:
+                st.divider()
+                
+                # 성과 분석
+                st.subheader("📈 최근 영상 성과")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("평균 조회수", format_number(int(sum(v['views'] for v in videos) / len(videos))))
+                c2.metric("평균 좋아요율", f"{sum(v['like_rate'] for v in videos) / len(videos):.2f}%")
+                c3.metric("평균 댓글", format_number(int(sum(v['comments'] for v in videos) / len(videos))))
+                c4.metric("평균 길이", format_duration(int(sum(v['duration_seconds'] for v in videos) / len(videos))))
+                
+                # 키워드
+                st.subheader("🏷️ 채널 인기 키워드")
+                keywords = extract_keywords([v["title"] for v in videos], top_n=15)
+                keyword_html = " ".join([f'<span class="keyword-tag">{kw} ({cnt})</span>' for kw, cnt in keywords])
+                st.markdown(keyword_html, unsafe_allow_html=True)
+                
+                # 영상 목록
+                st.subheader("🎬 최근 영상")
+                for i, video in enumerate(videos[:10], 1):
+                    with st.expander(f"{i}. {video['title'][:45]}... ({format_number(video['views'])}회)"):
+                        col1, col2 = st.columns([1, 2])
                         with col1:
                             if video.get("thumbnail"):
                                 st.image(video["thumbnail"], use_container_width=True)
-                        
                         with col2:
-                            st.write(f"**채널:** {video['channel']}")
                             st.write(f"**조회수:** {video['views']:,}")
-                            st.write(f"**좋아요:** {video['likes']:,}")
-                            st.write(f"**게시일:** {video['published_at'][:10]}")
-                            
-                            # 벤치마킹 체크박스
-                            if st.checkbox(f"벤치마킹 선택", key=f"bench_{i}"):
-                                if "benchmark_titles" not in st.session_state:
-                                    st.session_state["benchmark_titles"] = []
-                                if video["title"] not in st.session_state["benchmark_titles"]:
-                                    st.session_state["benchmark_titles"].append(video["title"])
-                
-                # 상승 키워드
-                if "keyword_data" in st.session_state:
-                    keyword_data = st.session_state["keyword_data"]
-                    if keyword_data.get("rising_keywords"):
-                        st.subheader("📈 상승 키워드")
-                        st.write(" | ".join([f"`{kw}`" for kw in keyword_data["rising_keywords"][:10]]))
-                
-                # AI 인사이트
-                if anthropic_key:
-                    if st.button("🤖 AI 인사이트 받기"):
-                        analyzer = TrendAnalyzer(youtube_key, anthropic_key)
-                        with st.spinner("AI가 분석 중..."):
-                            insights = analyzer.generate_ai_insights(selected_category, trending)
-                        st.subheader("💡 AI 인사이트")
-                        st.markdown(insights)
+                            st.write(f"**좋아요율:** {video['like_rate']:.2f}%")
+                            st.write(f"**댓글:** {video['comments']:,}")
+                            st.write(f"**길이:** {video['duration_formatted']}")
+                            st.markdown(f"[▶️ 보기](https://youtube.com/watch?v={video['video_id']})")
     
-    # ============ 탭 2: 대본 생성 ============
-    with tab2:
+    # ============ 탭 5: 대본 생성 ============
+    with tab5:
         st.header("📝 대본 생성")
         
         if not anthropic_key:
             st.warning("👈 사이드바에서 Anthropic API 키를 입력해주세요.")
-            st.info("""
-            **Anthropic API 키 발급 방법:**
-            1. [Anthropic Console](https://console.anthropic.com/) 접속
-            2. 회원가입/로그인
-            3. API Keys > Create Key
-            """)
+            st.info("**발급:** https://console.anthropic.com → API Keys → Create Key")
         else:
-            # 주제 입력
-            topic = st.text_input(
-                "🎯 영상 주제",
-                placeholder="예: 2024년 AI가 바꿀 10가지 직업의 미래",
-                help="구체적일수록 좋은 대본이 나옵니다"
-            )
+            st.success("✅ Anthropic 연결됨")
             
-            # 고급 옵션
-            with st.expander("⚙️ 고급 옵션"):
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    target_keywords = st.text_input(
-                        "SEO 키워드 (쉼표 구분)",
-                        placeholder="AI, 직업, 미래, 자동화"
-                    )
-                
-                with col2:
-                    style_notes = st.text_input(
-                        "스타일 요청",
-                        placeholder="예: 유머러스하게, 사례 중심으로"
-                    )
-                
-                # 벤치마킹 선택
-                benchmark_titles = st.session_state.get("benchmark_titles", [])
-                if benchmark_titles:
-                    st.write("**선택된 벤치마킹 영상:**")
-                    for title in benchmark_titles[:5]:
-                        st.write(f"- {title[:50]}...")
+            topic = st.text_input("영상 주제", placeholder="예: 2024년 AI 트렌드")
             
-            # 생성 버튼
-            if st.button("✨ 대본 생성", type="primary", use_container_width=True):
-                if not topic:
-                    st.warning("주제를 입력해주세요.")
-                else:
-                    generator = ScriptGenerator(anthropic_key)
-                    
-                    keywords = CATEGORIES[selected_category]["keywords"]
-                    if target_keywords:
-                        keywords = [k.strip() for k in target_keywords.split(",")] + keywords
-                    
-                    with st.spinner("AI가 대본 작성 중... (30초~1분)"):
-                        script = generator.generate_script(
-                            topic=topic,
-                            category=selected_category,
-                            video_length=video_length,
-                            competitor_titles=benchmark_titles,
-                            keywords=keywords,
-                            style_notes=style_notes
-                        )
-                    
-                    if "error" in script:
-                        st.error(f"오류: {script['error']}")
-                    else:
-                        st.session_state["generated_script"] = script
-                        st.success("✅ 대본 생성 완료!")
+            c1, c2 = st.columns(2)
+            with c1:
+                style = st.selectbox("스타일", ["정보 전달형", "스토리텔링형", "튜토리얼형", "리뷰형"])
+            with c2:
+                length = st.selectbox("영상 길이", ["숏폼 (1분)", "미드폼 (5분)", "롱폼 (10분)", "롱폼 (15분+)"])
             
-            # 생성된 대본 표시
-            if "generated_script" in st.session_state:
-                script = st.session_state["generated_script"]
-                
-                if "error" not in script:
-                    # SEO 섹션
-                    st.subheader("🔍 SEO 최적화")
-                    seo = script.get("seo", {})
-                    
-                    st.write("**제목 옵션:**")
-                    for i, title in enumerate(seo.get("title_options", []), 1):
-                        col1, col2 = st.columns([4, 1])
-                        with col1:
-                            st.code(title)
-                        with col2:
-                            if youtube_key:
-                                analyzer = TrendAnalyzer(youtube_key)
-                                pred = analyzer.predict_views(title, selected_category)
-                                st.write(pred["grade"])
-                    
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.write("**태그:**")
-                        st.write(", ".join(seo.get("tags", [])))
-                    with col2:
-                        st.write("**해시태그:**")
-                        st.write(" ".join(seo.get("hashtags", [])))
-                    
-                    # 훅 섹션
-                    st.subheader("🎣 훅 옵션 (첫 5초)")
-                    hooks = script.get("hooks", {})
-                    
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.info(f"**충격형**\n\n{hooks.get('hook_1', '')}")
-                    with col2:
-                        st.info(f"**질문형**\n\n{hooks.get('hook_2', '')}")
-                    with col3:
-                        st.info(f"**스토리형**\n\n{hooks.get('hook_3', '')}")
-                    
-                    # 장면별 대본
-                    st.subheader("🎬 장면별 대본")
-                    
-                    target_total = VIDEO_STRUCTURES[video_length]["total_seconds"]
-                    actual_total = script.get("total_duration", 0)
-                    
-                    col1, col2, col3 = st.columns(3)
-                    col1.metric("목표 길이", format_duration(target_total))
-                    col2.metric("예상 길이", script.get("total_display", "N/A"))
-                    col3.metric("차이", f"{actual_total - target_total:+.0f}초")
-                    
-                    for scene in script.get("scenes", []):
-                        target_dur = scene.get("target_duration", 0)
-                        actual_dur = scene.get("estimated_duration", 0)
-                        diff = actual_dur - target_dur
-                        
-                        status = "🟢" if abs(diff) <= 5 else ("🟡" if abs(diff) <= 10 else "🔴")
-                        
-                        with st.expander(
-                            f"{status} 장면 {scene['scene_number']}: {scene['scene_type'].upper()} "
-                            f"({scene.get('duration_display', 'N/A')} / 목표 {target_dur}초)"
-                        ):
-                            st.text_area(
-                                "나레이션",
-                                value=scene.get("narration", ""),
-                                height=120,
-                                key=f"narr_{scene['scene_number']}"
-                            )
-                            
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                st.write("**화면 텍스트:**")
-                                st.code(scene.get("on_screen_text", "-"))
-                            with col2:
-                                st.write("**시각 연출:**")
-                                st.write(scene.get("visual_note", "-"))
-                            
-                            if abs(diff) > 5:
-                                if diff > 0:
-                                    st.warning(f"⚠️ {diff:.0f}초 초과 - 나레이션을 줄여주세요")
-                                else:
-                                    st.info(f"ℹ️ {abs(diff):.0f}초 여유 - 내용 추가 가능")
-                    
-                    # 핵심 메시지
-                    st.subheader("💡 핵심 메시지")
-                    for msg in script.get("key_messages", []):
-                        st.write(f"• {msg}")
-    
-    # ============ 탭 3: 내보내기 ============
-    with tab3:
-        st.header("📥 결과 내보내기")
-        
-        if "generated_script" not in st.session_state:
-            st.info("먼저 '대본 생성' 탭에서 대본을 생성해주세요.")
-        else:
-            script = st.session_state["generated_script"]
-            
-            if "error" not in script:
-                # JSON 다운로드
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    json_str = json.dumps(script, ensure_ascii=False, indent=2)
-                    st.download_button(
-                        "📄 JSON 다운로드",
-                        json_str,
-                        file_name=f"script_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                        mime="application/json",
-                        use_container_width=True
-                    )
-                
-                # 텍스트 형식
-                with col2:
-                    full_script = []
-                    seo = script.get("seo", {})
-                    titles = seo.get("title_options", ["제목 없음"])
-                    
-                    full_script.append(f"# {titles[0]}\n")
-                    full_script.append(f"카테고리: {selected_category}")
-                    full_script.append(f"예상 길이: {script.get('total_display', 'N/A')}\n")
-                    full_script.append(f"태그: {', '.join(seo.get('tags', []))}\n")
-                    full_script.append("---\n")
-                    
-                    for scene in script.get("scenes", []):
-                        full_script.append(f"## [{scene['scene_type'].upper()}] 장면 {scene['scene_number']}")
-                        full_script.append(f"시간: {scene.get('duration_display', 'N/A')} (목표: {scene.get('target_duration', 0)}초)\n")
-                        full_script.append(f"### 나레이션\n{scene.get('narration', '')}\n")
-                        full_script.append(f"**화면 텍스트:** {scene.get('on_screen_text', '-')}")
-                        full_script.append(f"**시각 연출:** {scene.get('visual_note', '-')}\n")
-                        full_script.append("---\n")
-                    
-                    full_text = "\n".join(full_script)
-                    
-                    st.download_button(
-                        "📝 텍스트 다운로드",
-                        full_text,
-                        file_name=f"script_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                        mime="text/plain",
-                        use_container_width=True
-                    )
-                
-                # 미리보기
-                st.subheader("📋 전체 대본 미리보기")
-                st.text_area("", full_text, height=400)
+            if st.button("✨ 대본 생성", type="primary") and topic:
+                st.info("🚧 대본 생성 기능 준비 중...")
 
 
 if __name__ == "__main__":
